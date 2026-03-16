@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
@@ -133,389 +132,386 @@ async function seedDemoEvents() {
   }
 }
 
-async function startServer() {
-  const app = express();
-  app.use(express.json());
+const app = express();
+app.use(express.json());
 
-  // Run seeding
-  await seedAdmin();
-  await seedDemoEvents();
+// --- Auth Middleware ---
+const authenticate = (req: any, res: any, next: any) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
 
-  // --- Auth Middleware ---
-  const authenticate = (req: any, res: any, next: any) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET);
-      req.user = decoded;
-      next();
-    } catch (err) {
-      res.status(401).json({ error: 'Invalid token' });
-    }
-  };
-
-  // --- Auth Routes ---
-  app.post('/api/auth/register', async (req, res) => {
-    const { name, email, password, role, clubName } = req.body;
-    try {
-      const hashedPassword = bcrypt.hashSync(password, 10);
-      const { data, error } = await supabase
-        .from('users')
-        .insert({ name, email, password: hashedPassword, role, club_name: clubName })
-        .select()
-        .single();
-      
-      if (error) {
-        if (error.code === '23505') return res.status(400).json({ error: 'Email already exists' });
-        return handleSupabaseError(res, error);
-      }
-      res.json({ id: data.id });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.post('/api/auth/login', async (req, res) => {
-    const { email, password } = req.body;
-    const { data: user, error } = await supabase
+// --- Auth Routes ---
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password, role, clubName } = req.body;
+  try {
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const { data, error } = await supabase
       .from('users')
-      .select('*')
-      .eq('email', email)
-      .single();
-
-    if (error || !user || !bcrypt.compareSync(password, user.password)) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET);
-    res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email } });
-  });
-
-  // --- Event Routes ---
-  app.get('/api/events', async (req, res) => {
-    const { status, category } = req.query;
-    let query = supabase.from('events').select('*');
-    
-    if (status) query = query.eq('status', status);
-    if (category) query = query.eq('category', category);
-    
-    const { data: events, error } = await query;
-    if (error) return handleSupabaseError(res, error);
-    res.json(events);
-  });
-
-  app.get('/api/events/:id', async (req, res) => {
-    const { data: event, error: eventError } = await supabase
-      .from('events')
-      .select('*')
-      .eq('id', req.params.id)
-      .single();
-    
-    if (eventError) return handleSupabaseError(res, eventError);
-    
-    const { data: slots, error: slotsError } = await supabase
-      .from('event_slots')
-      .select('*')
-      .eq('event_id', req.params.id);
-    
-    if (slotsError) return handleSupabaseError(res, slotsError);
-    res.json({ ...event, slots });
-  });
-
-  app.post('/api/events', authenticate, async (req: any, res) => {
-    if (req.user.role === 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
-    const { title, description, rules, date, time, venue, posterUrl, category, parentEventId, slots } = req.body;
-    
-    const { data: event, error: eventError } = await supabase
-      .from('events')
-      .insert({
-        title, description, rules, date, time, venue, 
-        poster_url: posterUrl, category, 
-        organizer_id: req.user.id, 
-        parent_event_id: parentEventId, 
-        status: req.user.role === 'ADMIN' ? 'APPROVED' : 'PENDING'
-      })
+      .insert({ name, email, password: hashedPassword, role, club_name: clubName })
       .select()
       .single();
     
-    if (eventError) return handleSupabaseError(res, eventError);
-
-    if (slots && slots.length > 0) {
-      const slotsToInsert = slots.map((s: any) => ({
-        event_id: event.id,
-        start_time: s.startTime,
-        end_time: s.endTime,
-        total_seats: s.totalSeats,
-        available_seats: s.totalSeats
-      }));
-      const { error: slotsError } = await supabase.from('event_slots').insert(slotsToInsert);
-      if (slotsError) return handleSupabaseError(res, slotsError);
+    if (error) {
+      if (error.code === '23505') return res.status(400).json({ error: 'Email already exists' });
+      return handleSupabaseError(res, error);
     }
+    res.json({ id: data.id });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    res.json({ id: event.id });
-  });
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email', email)
+    .single();
 
-  app.patch('/api/events/:id/status', authenticate, async (req: any, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
-    const { status } = req.body;
-    const { error } = await supabase
-      .from('events')
-      .update({ status })
-      .eq('id', req.params.id);
-    
-    if (error) return handleSupabaseError(res, error);
-    res.json({ success: true });
-  });
+  if (error || !user || !bcrypt.compareSync(password, user.password)) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET);
+  res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email } });
+});
 
-  app.delete('/api/events/:id', authenticate, async (req: any, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
-    const { error } = await supabase.from('events').delete().eq('id', req.params.id);
-    if (error) return handleSupabaseError(res, error);
-    res.json({ success: true });
-  });
+// --- Event Routes ---
+app.get('/api/events', async (req, res) => {
+  const { status, category } = req.query;
+  let query = supabase.from('events').select('*');
+  
+  if (status) query = query.eq('status', status);
+  if (category) query = query.eq('category', category);
+  
+  const { data: events, error } = await query;
+  if (error) return handleSupabaseError(res, error);
+  res.json(events);
+});
 
-  // --- Booking Routes ---
-  app.post('/api/bookings', authenticate, async (req: any, res) => {
-    const { slotId } = req.body;
-    
-    // Use a transaction-like approach (Supabase doesn't have cross-table transactions in the same way, but we can use RPC or careful sequencing)
-    // For simplicity, we'll do sequential checks. For production, a Postgres Function (RPC) is better.
-    
-    const { data: slot, error: slotError } = await supabase
-      .from('event_slots')
-      .select('*')
-      .eq('id', slotId)
-      .single();
-    
-    if (slotError || !slot) return res.status(404).json({ error: 'Slot not found' });
-    if (slot.available_seats <= 0) return res.status(400).json({ error: 'No seats available' });
-    
-    const { data: existing } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('slot_id', slotId)
-      .single();
-    
-    if (existing) return res.status(400).json({ error: 'Already booked' });
+app.get('/api/events/:id', async (req, res) => {
+  const { data: event, error: eventError } = await supabase
+    .from('events')
+    .select('*')
+    .eq('id', req.params.id)
+    .single();
+  
+  if (eventError) return handleSupabaseError(res, eventError);
+  
+  const { data: slots, error: slotsError } = await supabase
+    .from('event_slots')
+    .select('*')
+    .eq('event_id', req.params.id);
+  
+  if (slotsError) return handleSupabaseError(res, slotsError);
+  res.json({ ...event, slots });
+});
 
-    // Decrement seats and insert booking
-    const { error: updateError } = await supabase
-      .from('event_slots')
-      .update({ available_seats: slot.available_seats - 1 })
-      .eq('id', slotId);
-    
-    if (updateError) return handleSupabaseError(res, updateError);
+app.post('/api/events', authenticate, async (req: any, res) => {
+  if (req.user.role === 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+  const { title, description, rules, date, time, venue, posterUrl, category, parentEventId, slots } = req.body;
+  
+  const { data: event, error: eventError } = await supabase
+    .from('events')
+    .insert({
+      title, description, rules, date, time, venue, 
+      poster_url: posterUrl, category, 
+      organizer_id: req.user.id, 
+      parent_event_id: parentEventId, 
+      status: req.user.role === 'ADMIN' ? 'APPROVED' : 'PENDING'
+    })
+    .select()
+    .single();
+  
+  if (eventError) return handleSupabaseError(res, eventError);
 
-    const { error: insertError } = await supabase
-      .from('bookings')
-      .insert({ user_id: req.user.id, slot_id: slotId });
-    
-    if (insertError) {
-      // Rollback seat decrement if booking fails
-      await supabase.from('event_slots').update({ available_seats: slot.available_seats }).eq('id', slotId);
-      return handleSupabaseError(res, insertError);
-    }
+  if (slots && slots.length > 0) {
+    const slotsToInsert = slots.map((s: any) => ({
+      event_id: event.id,
+      start_time: s.startTime,
+      end_time: s.endTime,
+      total_seats: s.totalSeats,
+      available_seats: s.totalSeats
+    }));
+    const { error: slotsError } = await supabase.from('event_slots').insert(slotsToInsert);
+    if (slotsError) return handleSupabaseError(res, slotsError);
+  }
 
-    res.json({ success: true });
-  });
+  res.json({ id: event.id });
+});
 
-  app.get('/api/my-bookings', authenticate, async (req: any, res) => {
-    const { data: bookings, error } = await supabase
+app.patch('/api/events/:id/status', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
+  const { status } = req.body;
+  const { error } = await supabase
+    .from('events')
+    .update({ status })
+    .eq('id', req.params.id);
+  
+  if (error) return handleSupabaseError(res, error);
+  res.json({ success: true });
+});
+
+app.delete('/api/events/:id', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
+  const { error } = await supabase.from('events').delete().eq('id', req.params.id);
+  if (error) return handleSupabaseError(res, error);
+  res.json({ success: true });
+});
+
+// --- Booking Routes ---
+app.post('/api/bookings', authenticate, async (req: any, res) => {
+  const { slotId } = req.body;
+  const { data: slot, error: slotError } = await supabase
+    .from('event_slots')
+    .select('*')
+    .eq('id', slotId)
+    .single();
+  
+  if (slotError || !slot) return res.status(404).json({ error: 'Slot not found' });
+  if (slot.available_seats <= 0) return res.status(400).json({ error: 'No seats available' });
+  
+  const { data: existing } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('user_id', req.user.id)
+    .eq('slot_id', slotId)
+    .single();
+  
+  if (existing) return res.status(400).json({ error: 'Already booked' });
+
+  const { error: updateError } = await supabase
+    .from('event_slots')
+    .update({ available_seats: slot.available_seats - 1 })
+    .eq('id', slotId);
+  
+  if (updateError) return handleSupabaseError(res, updateError);
+
+  const { error: insertError } = await supabase
+    .from('bookings')
+    .insert({ user_id: req.user.id, slot_id: slotId });
+  
+  if (insertError) {
+    await supabase.from('event_slots').update({ available_seats: slot.available_seats }).eq('id', slotId);
+    return handleSupabaseError(res, insertError);
+  }
+
+  res.json({ success: true });
+});
+
+app.get('/api/my-bookings', authenticate, async (req: any, res) => {
+  const { data: bookings, error } = await supabase
+    .from('bookings')
+    .select(`
+      *,
+      event_slots (
+        start_time,
+        end_time,
+        events (
+          title,
+          date,
+          venue
+        )
+      )
+    `)
+    .eq('user_id', req.user.id)
+    .order('booking_date', { ascending: false });
+  
+  if (error) return handleSupabaseError(res, error);
+
+  const flattened = bookings.map((b: any) => ({
+    ...b,
+    start_time: b.event_slots.start_time,
+    end_time: b.event_slots.end_time,
+    event_title: b.event_slots.events.title,
+    event_date: b.event_slots.events.date,
+    venue: b.event_slots.events.venue
+  }));
+
+  res.json(flattened);
+});
+
+app.post('/api/bookings/:id/cancel', authenticate, async (req: any, res) => {
+  try {
+    const { data: booking, error: bookingError } = await supabase
       .from('bookings')
       .select(`
         *,
         event_slots (
+          id,
           start_time,
-          end_time,
           events (
             title,
-            date,
-            venue
+            date
           )
         )
       `)
+      .eq('id', req.params.id)
       .eq('user_id', req.user.id)
-      .order('booking_date', { ascending: false });
+      .single();
+
+    if (bookingError || !booking) return res.status(404).json({ error: 'Booking not found' });
+    if (booking.status === 'CANCELLED') return res.status(400).json({ error: 'Booking is already cancelled' });
+
+    const eventDate = booking.event_slots.events.date;
+    const startTime = booking.event_slots.start_time;
     
-    if (error) return handleSupabaseError(res, error);
+    const parts = startTime.split(' ');
+    const timePart = parts[0];
+    const modifier = parts[1];
+    let [hoursStr, minutesStr] = timePart.split(':');
+    let hours = parseInt(hoursStr, 10);
+    const minutes = parseInt(minutesStr, 10);
+    if (modifier === 'PM' && hours < 12) hours += 12;
+    if (modifier === 'AM' && hours === 12) hours = 0;
+    
+    const eventDateTime = new Date(`${eventDate}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`);
+    const now = new Date();
+    const diffInHours = (eventDateTime.getTime() - now.getTime()) / (1000 * 60 * 60);
 
-    // Flatten the response to match the frontend expectation
-    const flattened = bookings.map((b: any) => ({
-      ...b,
-      start_time: b.event_slots.start_time,
-      end_time: b.event_slots.end_time,
-      event_title: b.event_slots.events.title,
-      event_date: b.event_slots.events.date,
-      venue: b.event_slots.events.venue
-    }));
-
-    res.json(flattened);
-  });
-
-  app.post('/api/bookings/:id/cancel', authenticate, async (req: any, res) => {
-    try {
-      const { data: booking, error: bookingError } = await supabase
-        .from('bookings')
-        .select(`
-          *,
-          event_slots (
-            id,
-            start_time,
-            events (
-              title,
-              date
-            )
-          )
-        `)
-        .eq('id', req.params.id)
-        .eq('user_id', req.user.id)
-        .single();
-
-      if (bookingError || !booking) return res.status(404).json({ error: 'Booking not found' });
-      if (booking.status === 'CANCELLED') return res.status(400).json({ error: 'Booking is already cancelled' });
-
-      // Time check logic (similar to SQLite version)
-      const eventDate = booking.event_slots.events.date;
-      const startTime = booking.event_slots.start_time;
-      
-      const parts = startTime.split(' ');
-      const timePart = parts[0];
-      const modifier = parts[1];
-      let [hoursStr, minutesStr] = timePart.split(':');
-      let hours = parseInt(hoursStr, 10);
-      const minutes = parseInt(minutesStr, 10);
-      if (modifier === 'PM' && hours < 12) hours += 12;
-      if (modifier === 'AM' && hours === 12) hours = 0;
-      
-      const eventDateTime = new Date(`${eventDate}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`);
-      const now = new Date();
-      const diffInHours = (eventDateTime.getTime() - now.getTime()) / (1000 * 60 * 60);
-
-      if (diffInHours < 24) {
-        return res.status(400).json({ error: 'Cancellations must be made at least 24 hours before the event starts.' });
-      }
-
-      // Update status and increment seats
-      await supabase.from('bookings').update({ status: 'CANCELLED' }).eq('id', req.params.id);
-      
-      const { data: slot } = await supabase.from('event_slots').select('available_seats').eq('id', booking.slot_id).single();
-      if (slot) {
-        await supabase.from('event_slots').update({ available_seats: slot.available_seats + 1 }).eq('id', booking.slot_id);
-      }
-
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    if (diffInHours < 24) {
+      return res.status(400).json({ error: 'Cancellations must be made at least 24 hours before the event starts.' });
     }
-  });
 
-  // --- Admin Routes ---
-  app.get('/api/admin/bookings', authenticate, async (req: any, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
-    const { data: bookings, error } = await supabase
-      .from('bookings')
-      .select(`
-        *,
-        users (name, email),
-        event_slots (
-          start_time,
-          end_time,
-          events (
-            title,
-            date,
-            venue
-          )
-        )
-      `)
-      .order('booking_date', { ascending: false });
+    await supabase.from('bookings').update({ status: 'CANCELLED' }).eq('id', req.params.id);
     
-    if (error) return handleSupabaseError(res, error);
+    const { data: slot } = await supabase.from('event_slots').select('available_seats').eq('id', booking.slot_id).single();
+    if (slot) {
+      await supabase.from('event_slots').update({ available_seats: slot.available_seats + 1 }).eq('id', booking.slot_id);
+    }
 
-    const flattened = bookings.map((b: any) => ({
-      ...b,
-      user_name: b.users.name,
-      user_email: b.users.email,
-      event_title: b.event_slots.events.title,
-      event_date: b.event_slots.events.date,
-      venue: b.event_slots.events.venue,
-      start_time: b.event_slots.start_time,
-      end_time: b.event_slots.end_time
-    }));
-
-    res.json(flattened);
-  });
-
-  app.get('/api/admin/users', authenticate, async (req: any, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
-    const { data: users, error } = await supabase.from('users').select('id, name, email, role, club_name');
-    if (error) return handleSupabaseError(res, error);
-    res.json(users);
-  });
-
-  app.patch('/api/admin/users/:id/role', authenticate, async (req: any, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
-    const { role } = req.body;
-    const { error } = await supabase.from('users').update({ role }).eq('id', req.params.id);
-    if (error) return handleSupabaseError(res, error);
     res.json({ success: true });
-  });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  app.get('/api/admin/logs', authenticate, async (req: any, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
-    
-    // In Supabase/Postgres, we can't easily do the same subquery concatenation in one line as SQLite
-    // We'll fetch separately and combine
-    const { data: bookings } = await supabase
-      .from('bookings')
-      .select(`
-        booking_date,
-        event_slots (
-          events (title)
+// --- Admin Routes ---
+app.get('/api/admin/bookings', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
+  const { data: bookings, error } = await supabase
+    .from('bookings')
+    .select(`
+      *,
+      users (name, email),
+      event_slots (
+        start_time,
+        end_time,
+        events (
+          title,
+          date,
+          venue
         )
-      `)
-      .order('booking_date', { ascending: false })
-      .limit(20);
-    
-    const { data: users } = await supabase
-      .from('users')
-      .select('name, role, created_at')
-      .order('created_at', { ascending: false })
-      .limit(10);
+      )
+    `)
+    .order('booking_date', { ascending: false });
+  
+  if (error) return handleSupabaseError(res, error);
 
-    const bookingLogs = (bookings || []).map((b: any) => ({
-      timestamp: b.booking_date,
-      type: 'BOOKING',
-      message: `New booking for ${b.event_slots?.events?.title || 'Unknown Event'}`
-    }));
+  const flattened = bookings.map((b: any) => ({
+    ...b,
+    user_name: b.users.name,
+    user_email: b.users.email,
+    event_title: b.event_slots.events.title,
+    event_date: b.event_slots.events.date,
+    venue: b.event_slots.events.venue,
+    start_time: b.event_slots.start_time,
+    end_time: b.event_slots.end_time
+  }));
 
-    const userLogs = (users || []).map((u: any) => ({
-      timestamp: u.created_at,
-      type: 'USER',
-      message: `${u.name} joined as ${u.role}`
-    }));
+  res.json(flattened);
+});
 
-    const logs = [...bookingLogs, ...userLogs].sort((a: any, b: any) => 
-      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
+app.get('/api/admin/users', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
+  const { data: users, error } = await supabase.from('users').select('id, name, email, role, club_name');
+  if (error) return handleSupabaseError(res, error);
+  res.json(users);
+});
 
-    res.json(logs);
-  });
+app.patch('/api/admin/users/:id/role', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
+  const { role } = req.body;
+  const { error } = await supabase.from('users').update({ role }).eq('id', req.params.id);
+  if (error) return handleSupabaseError(res, error);
+  res.json({ success: true });
+});
+
+app.get('/api/admin/logs', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Forbidden' });
+  
+  const { data: bookings } = await supabase
+    .from('bookings')
+    .select(`
+      booking_date,
+      event_slots (
+        events (title)
+      )
+    `)
+    .order('booking_date', { ascending: false })
+    .limit(20);
+  
+  const { data: users } = await supabase
+    .from('users')
+    .select('name, role, created_at')
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  const bookingLogs = (bookings || []).map((b: any) => ({
+    timestamp: b.booking_date,
+    type: 'BOOKING',
+    message: `New booking for ${b.event_slots?.events?.title || 'Unknown Event'}`
+  }));
+
+  const userLogs = (users || []).map((u: any) => ({
+    timestamp: u.created_at,
+    type: 'USER',
+    message: `${u.name} joined as ${u.role}`
+  }));
+
+  const logs = [...bookingLogs, ...userLogs].sort((a: any, b: any) => 
+    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+
+  res.json(logs);
+});
+
+async function startServer() {
+  // Run seeding in background
+  seedAdmin().catch(console.error);
+  seedDemoEvents().catch(console.error);
 
   // --- Vite Middleware ---
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
+    
+    app.listen(3000, '0.0.0.0', () => {
+      console.log('Server running on http://localhost:3000');
+    });
   } else {
+    // In Vercel, static files are handled by the platform, 
+    // but we keep this for local production testing
     app.use(express.static('dist'));
-    app.get('*', (req, res) => res.sendFile(path.resolve('dist/index.html')));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(path.resolve('dist/index.html'));
+    });
   }
-
-  app.listen(3000, '0.0.0.0', () => {
-    console.log('Server running on http://localhost:3000');
-  });
 }
 
 startServer();
+
+export default app;
