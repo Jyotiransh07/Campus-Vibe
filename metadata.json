@@ -1,0 +1,5 @@
+{
+  "name": "CampusVibe",
+  "description": "A professional college event management system with role-based access, event discovery, and a visual slot booking system.",
+  "requestFramePermissions": []
+}
